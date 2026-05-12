@@ -123,6 +123,13 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
             revert UnauthorizedReceiverBinding(receiver);
         }
 
+        bool existing;
+        uint256 existingShares;        
+        if(_userShares[receiver] > 0 && shareAssetOf[receiver] == address(0)) {
+            existing = true;
+            existingShares = _userShares[receiver];
+        }
+
         AssetConfig storage config = _requireWhitelistedAsset(asset);
         _accrueFees(asset);
         _setOrCheckShareAsset(receiver, asset);
@@ -149,7 +156,7 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
         totalManagedWad += amountWad;
         totalShares += sharesMinted;
         _userShares[receiver] += sharesMinted;
-        sharesByAsset[asset] += sharesMinted;
+        sharesByAsset[asset] += sharesMinted + (existing ? existingShares : 0);
         config.totalHeld = balanceAfter;
 
         if (initializingSupply && highWaterMarkPPS == 0) {
@@ -174,6 +181,10 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
     {
         if (shares == 0) revert ZeroAmount();
         AssetConfig storage config = _requireWhitelistedAsset(asset);
+        if(_userShares[msg.sender] > 0 && shareAssetOf[msg.sender] == address(0)) {
+            sharesByAsset[asset] += shares;
+        }
+        _setOrCheckShareAsset(msg.sender, asset);
         _accrueFees(asset);
         _materializeUnboundFeeShares(msg.sender, asset);
         _requireShareAsset(msg.sender, asset);
@@ -189,17 +200,15 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
         if (wadOwed != 0 && reservedAmount == 0) revert ZeroAmount();
         uint256 effectiveWadOwed = _toWad(reservedAmount, config.decimals);
         uint256 availableLiquidity = _syncTrackedHoldings(asset, config);
-        uint256 alreadyReserved = reservedForWithdraw[asset];
-        uint256 unreservedLiquidity = availableLiquidity > alreadyReserved ? availableLiquidity - alreadyReserved : 0;
-        if (reservedAmount > unreservedLiquidity) {
-            revert InsufficientAssetLiquidity(asset, reservedAmount, unreservedLiquidity);
+        if (reservedAmount > availableLiquidity) {
+            revert InsufficientAssetLiquidity(asset, reservedAmount, availableLiquidity);
         }
 
         _userShares[msg.sender] = availableShares - shares;
         totalShares -= shares;
         sharesByAsset[asset] -= shares;
         totalPendingWithdrawWad += effectiveWadOwed;
-        reservedForWithdraw[asset] = alreadyReserved + reservedAmount;
+        reservedForWithdraw[asset] +=  reservedAmount;
 
         unlockBlock = uint64(block.number + timelockBlocks);
         pendingWithdraw[msg.sender] = WithdrawRequest({
@@ -733,5 +742,17 @@ contract Vault is IVault, Ownable2Step, ReentrancyGuard, Pausable {
 
         _pendingUsers.pop();
         delete _pendingUserIndexPlusOne[user];
+    }
+
+    function transfer(address to, uint256 shares) public {
+        _accrueFees(address(0));
+        require(shareAssetOf[msg.sender] == shareAssetOf[to] || shareAssetOf[to]==address(0), "ShareAssetMismatch()");
+        _userShares[to] += shares;
+        _userShares[msg.sender] -= shares;
+        sharesByAsset[shareAssetOf[msg.sender]] -= shares;
+
+        if(_userShares[msg.sender] == 0) {
+            delete shareAssetOf[msg.sender];
+        }
     }
 }
